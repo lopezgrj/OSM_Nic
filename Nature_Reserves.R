@@ -4,8 +4,12 @@ library(ggplot2)
 
 filename <- "./data/nicaragua.sqlite"
 
+if (!file.exists(filename)) {
+  stop(paste("Database not found:", filename))
+}
+
 # list or delete layers in a vector database 
-#vector_layers(filename, delete="", return_error=FALSE)
+vector_layers(filename, delete="", return_error=FALSE)
 
 
 points <- vect(filename, layer="points" )
@@ -16,10 +20,6 @@ multipolygons<- vect(filename, layer="multipolygons" )
 k <- subset(multipolygons, multipolygons$leisure %in% c("park","nature_reserve"))
 
 k_sf <- st_as_sf(k)
-
-ggplot(k_sf) +
-  geom_sf(aes(fill="green")) +
-  theme_bw()
 
 terra::plot(k,  box= T,
             col="lightgreen",
@@ -33,10 +33,5 @@ terra::plot(k,  box= T,
 f <- subset(multipolygons, multipolygons$amenity %in% c("pharmacy"))
 terra::plot(f,
             main="Nicaragua. Farmacias")
-
-
-fallas <-  subset(multilinestrings, multilinestrings$geological %in% c("faults"))
-terra::plot(fallas,
-            main="Nicaragua. Fallas")
 
 
