@@ -10,7 +10,7 @@ source("code/downloadOSMData.R")
 shiny::runApp("app.R")
 ```
 
-Optional Taginfo DB setup:
+Optional Taginfo DB setup (Very Large Download):
 
 ```r
 source("code/downloadTaginfodb.R")

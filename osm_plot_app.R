@@ -41,6 +41,16 @@ split_value_expression <- function(value_expression) {
     return(list(character(0)))
   }
 
+  # Protect quoted literals so operator normalization does not rewrite them.
+  quoted <- regmatches(expr, gregexpr('"[^\"]*"|\'[^\']*\'', expr, perl = TRUE))[[1]]
+  placeholders <- character(0)
+  if (length(quoted) > 0) {
+    placeholders <- paste0("__Q", seq_along(quoted), "__")
+    for (i in seq_along(quoted)) {
+      expr <- sub(quoted[i], placeholders[i], expr, fixed = TRUE)
+    }
+  }
+
   # Support both word operators (AND/OR) and symbolic operators (&, ||).
   expr <- gsub("\\|\\|", " OR ", expr, perl = TRUE)
   expr <- gsub("(?i)\\bOR\\b", " OR ", expr, perl = TRUE)
@@ -49,10 +59,28 @@ split_value_expression <- function(value_expression) {
   expr <- gsub("\\s+", " ", expr, perl = TRUE)
   expr <- trimws(expr)
 
+  restore_quoted <- function(term) {
+    restored <- term
+    if (length(placeholders) > 0) {
+      for (i in seq_along(placeholders)) {
+        restored <- gsub(placeholders[i], quoted[i], restored, fixed = TRUE)
+      }
+    }
+
+    # Strip matching outer quotes so quoted literals become normal search terms.
+    if (grepl('^".*"$', restored)) {
+      restored <- substr(restored, 2, nchar(restored) - 1)
+    } else if (grepl("^'.*'$", restored)) {
+      restored <- substr(restored, 2, nchar(restored) - 1)
+    }
+    restored
+  }
+
   or_parts <- strsplit(expr, "\\s+OR\\s+", perl = TRUE)[[1]]
   lapply(or_parts, function(or_part) {
     and_parts <- strsplit(or_part, "\\s+AND\\s+", perl = TRUE)[[1]]
     and_parts <- trimws(and_parts)
+    and_parts <- vapply(and_parts, restore_quoted, character(1))
     and_parts[nzchar(and_parts)]
   })
 }
@@ -255,24 +283,70 @@ read_layer_data <- function(con, table_name, max_rows, where_clause = NULL) {
   dbGetQuery(con, sql)
 }
 
+read_layer_data_all <- function(con, table_name, where_clause = NULL) {
+  tbl_id <- dbQuoteIdentifier(con, table_name)
+  sql <- paste0("SELECT * FROM ", tbl_id)
+
+  if (!is.null(where_clause) && nzchar(where_clause)) {
+    sql <- paste0(sql, " WHERE ", where_clause)
+  }
+
+  sql <- paste0(sql, ";")
+  dbGetQuery(con, sql)
+}
+
+with_hover_info <- function(control, help_text) {
+  tags$div(title = help_text, control)
+}
+
 ui <- fluidPage(
   titlePanel("Nicaragua OSM Viewer (DuckDB)"),
   sidebarLayout(
     sidebarPanel(
-      selectInput("table", "Layer", choices = character(0)),
-      selectInput("source_type", "Tag source", choices = c("Direct column", "other_tags", "Any"), selected = "Any"),
+      with_hover_info(
+        selectInput("table", "Layer", choices = character(0)),
+        "Choose the feature table to query and display on the map."
+      ),
+      with_hover_info(
+        selectInput("source_type", "Tag source", choices = c("Direct column", "other_tags", "Any"), selected = "Any"),
+        "Pick where tag values are searched: direct columns, other_tags key/value pairs, or any source."
+      ),
       conditionalPanel(
         condition = "input.source_type == 'Direct column'",
-        selectInput("direct_tag_col", "Tag column", choices = character(0))
+        with_hover_info(
+          selectInput("direct_tag_col", "Tag column", choices = character(0)),
+          "Select the direct attribute column used for filtering in Direct column mode."
+        )
       ),
       conditionalPanel(
         condition = "input.source_type == 'other_tags'",
-        textInput("other_tag_key", "Tag key in other_tags", value = "amenity")
+        with_hover_info(
+          textInput("other_tag_key", "Tag key in other_tags", value = "amenity"),
+          "Enter the key inside other_tags to filter, for example amenity, shop, or highway."
+        )
       ),
-      selectInput("value_mode", "Value match", choices = c("Contains", "Exact"), selected = "Contains"),
-      textInput("tag_value", "Tag value (supports AND/OR or &/||)", value = ""),
-      numericInput("max_rows", "Max features to draw", value = 5000, min = 100, max = 100000, step = 100),
-      actionButton("reload", "Load layer")
+      with_hover_info(
+        selectInput("value_mode", "Value match", choices = c("Contains", "Exact"), selected = "Contains"),
+        "Contains matches partial text; Exact matches the full value."
+      ),
+      with_hover_info(
+        textInput("tag_value", "Tag value (supports AND/OR or &/||; quote literals like \"or\")", value = ""),
+        "Filter expression. Use AND/OR or &/||. Quote literals like \"or\" when searching those words."
+      ),
+      with_hover_info(
+        numericInput("max_rows", "Max features to draw", value = 5000, min = 100, max = 100000, step = 100),
+        "Maximum number of matched features loaded to the map for display performance."
+      ),
+      with_hover_info(
+        actionButton("reload", "Load layer"),
+        "Apply the current filters and refresh map, stats, and preview."
+      ),
+      br(),
+      br(),
+      with_hover_info(
+        downloadButton("download_gpkg", "Export filtered to GeoPackage"),
+        "Export all matched features to a GeoPackage file using the current filters."
+      )
     ),
     mainPanel(
       h4("Layer stats"),
@@ -355,6 +429,7 @@ server <- function(input, output, session) {
         list(
           sf = st_sf(),
           raw = dat,
+          where_clause = where_clause,
           stats = data.frame(
             layer = input$table,
             tag_source = input$source_type,
@@ -372,6 +447,7 @@ server <- function(input, output, session) {
     list(
       sf = sf_obj,
       raw = dat,
+      where_clause = where_clause,
       stats = data.frame(
         layer = input$table,
         tag_source = input$source_type,
@@ -432,6 +508,35 @@ server <- function(input, output, session) {
     }
     head(preview_df, 10)
   }, striped = TRUE, bordered = TRUE, width = "100%")
+
+  output$download_gpkg <- downloadHandler(
+    filename = function() {
+      tbl <- gsub("[^A-Za-z0-9_]+", "_", input$table)
+      paste0(tbl, "_filtered.gpkg")
+    },
+    content = function(file) {
+      obj <- layer_result()
+      where_clause <- obj$where_clause
+
+      export_df <- read_layer_data_all(
+        con = con,
+        table_name = input$table,
+        where_clause = where_clause
+      )
+
+      if (!"WKT_GEOMETRY" %in% names(export_df)) {
+        stop("Selected table does not include WKT_GEOMETRY")
+      }
+
+      if (nrow(export_df) == 0) {
+        stop("No features to export for the current filter.")
+      }
+
+      export_sf <- st_as_sf(export_df, wkt = "WKT_GEOMETRY", crs = 4326)
+      layer_name <- gsub("[^A-Za-z0-9_]+", "_", input$table)
+      st_write(export_sf, dsn = file, layer = layer_name, delete_dsn = TRUE, quiet = TRUE)
+    }
+  )
 }
 
 shinyApp(ui, server)
