@@ -29,170 +29,226 @@ get_feature_tables <- function(con) {
   all_tables$table_name[keep]
 }
 
-build_where_clauses <- function(
-    con,
-    table_name,
-    filter_col = NULL,
-    filter_val = NULL,
-    amenity_val = "All",
-    highway_val = "All",
-  leisure_val = "All",
-  poi_types = character(0)
-) {
+get_direct_tag_columns <- function(con, table_name) {
   cols <- get_table_columns(con, table_name)
-  clauses <- character(0)
+  excluded <- c("ogc_fid", "WKT_GEOMETRY", "osm_id", "osm_way_id", "z_order", "other_tags")
+  setdiff(cols, excluded)
+}
 
-  if (!is.null(filter_col) && nzchar(filter_col) && !is.null(filter_val) && nzchar(filter_val) && filter_col %in% cols) {
-    col_id <- dbQuoteIdentifier(con, filter_col)
-    val <- dbQuoteString(con, paste0("%", filter_val, "%"))
-    clauses <- c(clauses, paste0("CAST(", col_id, " AS VARCHAR) ILIKE ", val))
+split_value_expression <- function(value_expression) {
+  expr <- trimws(value_expression)
+  if (!nzchar(expr)) {
+    return(list(character(0)))
   }
 
-  add_equals_clause <- function(col_name, selected_val) {
-    if (col_name %in% cols && !is.null(selected_val) && nzchar(selected_val) && selected_val != "All") {
-      col_id <- dbQuoteIdentifier(con, col_name)
-      val <- dbQuoteString(con, selected_val)
-      paste0("CAST(", col_id, " AS VARCHAR) = ", val)
-    } else {
-      NULL
+  # Support both word operators (AND/OR) and symbolic operators (&, ||).
+  expr <- gsub("\\|\\|", " OR ", expr, perl = TRUE)
+  expr <- gsub("(?i)\\bOR\\b", " OR ", expr, perl = TRUE)
+  expr <- gsub("&", " AND ", expr, fixed = TRUE)
+  expr <- gsub("(?i)\\bAND\\b", " AND ", expr, perl = TRUE)
+  expr <- gsub("\\s+", " ", expr, perl = TRUE)
+  expr <- trimws(expr)
+
+  or_parts <- strsplit(expr, "\\s+OR\\s+", perl = TRUE)[[1]]
+  lapply(or_parts, function(or_part) {
+    and_parts <- strsplit(or_part, "\\s+AND\\s+", perl = TRUE)[[1]]
+    and_parts <- trimws(and_parts)
+    and_parts[nzchar(and_parts)]
+  })
+}
+
+build_grouped_clause <- function(term_groups, term_builder) {
+  or_clauses <- lapply(term_groups, function(and_terms) {
+    if (length(and_terms) == 0) {
+      return(NULL)
     }
+
+    and_clauses <- vapply(and_terms, term_builder, character(1))
+    and_clauses <- and_clauses[nzchar(and_clauses)]
+    if (length(and_clauses) == 0) {
+      return(NULL)
+    }
+
+    paste0("(", paste(and_clauses, collapse = " AND "), ")")
+  })
+
+  or_clauses <- unlist(or_clauses)
+  or_clauses <- or_clauses[nzchar(or_clauses)]
+  if (length(or_clauses) == 0) {
+    return(NULL)
   }
 
-  clauses <- c(
-    clauses,
-    add_equals_clause("amenity", amenity_val),
-    add_equals_clause("highway", highway_val),
-    add_equals_clause("leisure", leisure_val)
-  )
+  paste0("(", paste(or_clauses, collapse = " OR "), ")")
+}
 
-  if ("amenity" %in% cols && length(poi_types) > 0) {
-    amenity_id <- dbQuoteIdentifier(con, "amenity")
-    poi_sql_values <- vapply(poi_types, function(x) dbQuoteString(con, x), character(1))
-    amenity_clause <- paste0(
-      "CAST(",
-      amenity_id,
-      " AS VARCHAR) IN (",
-      paste(poi_sql_values, collapse = ", "),
+build_tag_clause <- function(con, table_name, source_type, direct_tag_col, other_tag_key, value_mode, tag_value) {
+  cols <- get_table_columns(con, table_name)
+  value <- trimws(tag_value)
+  term_groups <- split_value_expression(value)
+
+  if (identical(source_type, "Direct column")) {
+    if (!(direct_tag_col %in% cols)) {
+      return(NULL)
+    }
+
+    col_id <- dbQuoteIdentifier(con, direct_tag_col)
+    if (!nzchar(value)) {
+      return(paste0("CAST(", col_id, " AS VARCHAR) IS NOT NULL AND CAST(", col_id, " AS VARCHAR) <> ''"))
+    }
+
+    return(
+      build_grouped_clause(term_groups, function(term) {
+        if (identical(value_mode, "Exact")) {
+          return(paste0("LOWER(CAST(", col_id, " AS VARCHAR)) = LOWER(", dbQuoteString(con, term), ")"))
+        }
+
+        paste0(
+          "LOWER(CAST(", col_id, " AS VARCHAR)) LIKE LOWER(",
+          dbQuoteString(con, paste0("%", term, "%")),
+          ")"
+        )
+      })
+    )
+  }
+
+  if (!("other_tags" %in% cols)) {
+    return(NULL)
+  }
+
+  key <- trimws(other_tag_key)
+  if (!nzchar(key)) {
+    return(NULL)
+  }
+
+  other_tags_id <- dbQuoteIdentifier(con, "other_tags")
+
+  if (!nzchar(value)) {
+    pattern <- paste0('%"', key, '"=>"%')
+    return(
+      paste0(
+        "LOWER(CAST(", other_tags_id, " AS VARCHAR)) LIKE LOWER(",
+        dbQuoteString(con, pattern),
+        ")"
+      )
+    )
+  }
+
+  build_grouped_clause(term_groups, function(term) {
+    escaped_term <- gsub('"', '\\\\"', term)
+    if (identical(value_mode, "Exact")) {
+      pattern <- paste0('%"', key, '"=>"', escaped_term, '"%')
+    } else {
+      pattern <- paste0('%"', key, '"=>"%', escaped_term, '%"%')
+    }
+
+    paste0(
+      "LOWER(CAST(", other_tags_id, " AS VARCHAR)) LIKE LOWER(",
+      dbQuoteString(con, pattern),
       ")"
     )
+  })
+}
 
+build_any_term_clause <- function(con, table_name, term, value_mode) {
+  cols <- get_table_columns(con, table_name)
+  direct_cols <- get_direct_tag_columns(con, table_name)
+
+  direct_clauses <- lapply(direct_cols, function(col_name) {
+    col_id <- dbQuoteIdentifier(con, col_name)
+    if (identical(value_mode, "Exact")) {
+      return(paste0("LOWER(CAST(", col_id, " AS VARCHAR)) = LOWER(", dbQuoteString(con, term), ")"))
+    }
+
+    paste0(
+      "LOWER(CAST(", col_id, " AS VARCHAR)) LIKE LOWER(",
+      dbQuoteString(con, paste0("%", term, "%")),
+      ")"
+    )
+  })
+
+  other_clause <- NULL
+  if ("other_tags" %in% cols) {
+    other_tags_id <- dbQuoteIdentifier(con, "other_tags")
+    escaped_term <- gsub('"', '\\\\"', term)
+
+    if (identical(value_mode, "Exact")) {
+      pattern <- paste0('%=>"', escaped_term, '"%')
+    } else {
+      pattern <- paste0("%", escaped_term, "%")
+    }
+
+    other_clause <- paste0(
+      "LOWER(CAST(", other_tags_id, " AS VARCHAR)) LIKE LOWER(",
+      dbQuoteString(con, pattern),
+      ")"
+    )
+  }
+
+  parts <- c(unlist(direct_clauses), other_clause)
+  parts <- parts[!vapply(parts, is.null, logical(1))]
+  if (length(parts) == 0) {
+    return("")
+  }
+
+  paste0("(", paste(parts, collapse = " OR "), ")")
+}
+
+build_any_clause <- function(con, table_name, value_mode, tag_value) {
+  value <- trimws(tag_value)
+  cols <- get_table_columns(con, table_name)
+
+  if (!nzchar(value)) {
+    direct_cols <- get_direct_tag_columns(con, table_name)
+    direct_clauses <- lapply(direct_cols, function(col_name) {
+      col_id <- dbQuoteIdentifier(con, col_name)
+      paste0("CAST(", col_id, " AS VARCHAR) IS NOT NULL AND CAST(", col_id, " AS VARCHAR) <> ''")
+    })
+
+    other_clause <- NULL
     if ("other_tags" %in% cols) {
       other_tags_id <- dbQuoteIdentifier(con, "other_tags")
-      tag_checks <- character(0)
-
-      if ("hospital" %in% poi_types) {
-        tag_checks <- c(
-          tag_checks,
-          paste0("CAST(", other_tags_id, " AS VARCHAR) ILIKE '%\\\"amenity\\\"=>\\\"hospital\\\"%'"),
-          paste0("CAST(", other_tags_id, " AS VARCHAR) ILIKE '%\\\"healthcare\\\"=>\\\"hospital\\\"%'")
-        )
-      }
-
-      if ("pharmacy" %in% poi_types) {
-        tag_checks <- c(
-          tag_checks,
-          paste0("CAST(", other_tags_id, " AS VARCHAR) ILIKE '%\\\"amenity\\\"=>\\\"pharmacy\\\"%'"),
-          paste0("CAST(", other_tags_id, " AS VARCHAR) ILIKE '%\\\"shop\\\"=>\\\"chemist\\\"%'")
-        )
-      }
-
-      if (length(tag_checks) > 0) {
-        clauses <- c(clauses, paste0("(", amenity_clause, " OR ", paste(tag_checks, collapse = " OR "), ")"))
-      } else {
-        clauses <- c(clauses, amenity_clause)
-      }
-    } else {
-      clauses <- c(clauses, amenity_clause)
-    }
-  } else if ("other_tags" %in% cols && length(poi_types) > 0) {
-    other_tags_id <- dbQuoteIdentifier(con, "other_tags")
-    tag_checks <- character(0)
-
-    if ("hospital" %in% poi_types) {
-      tag_checks <- c(
-        tag_checks,
-        paste0("CAST(", other_tags_id, " AS VARCHAR) ILIKE '%\\\"amenity\\\"=>\\\"hospital\\\"%'"),
-        paste0("CAST(", other_tags_id, " AS VARCHAR) ILIKE '%\\\"healthcare\\\"=>\\\"hospital\\\"%'")
-      )
+      other_clause <- paste0("CAST(", other_tags_id, " AS VARCHAR) IS NOT NULL AND CAST(", other_tags_id, " AS VARCHAR) <> ''")
     }
 
-    if ("pharmacy" %in% poi_types) {
-      tag_checks <- c(
-        tag_checks,
-        paste0("CAST(", other_tags_id, " AS VARCHAR) ILIKE '%\\\"amenity\\\"=>\\\"pharmacy\\\"%'"),
-        paste0("CAST(", other_tags_id, " AS VARCHAR) ILIKE '%\\\"shop\\\"=>\\\"chemist\\\"%'")
-      )
+    clauses <- c(unlist(direct_clauses), other_clause)
+    clauses <- clauses[!vapply(clauses, is.null, logical(1))]
+    if (length(clauses) == 0) {
+      return(NULL)
     }
 
-    if (length(tag_checks) > 0) {
-      clauses <- c(clauses, paste0("(", paste(tag_checks, collapse = " OR "), ")"))
-    }
+    return(paste0("(", paste(clauses, collapse = " OR "), ")"))
   }
 
-  clauses[!vapply(clauses, is.null, logical(1))]
-}
+  term_groups <- split_value_expression(value)
+  clauses <- build_grouped_clause(term_groups, function(term) {
+    build_any_term_clause(con, table_name, term, value_mode)
+  })
 
-get_distinct_values <- function(con, table_name, column_name, max_values = 200) {
-  cols <- get_table_columns(con, table_name)
-  if (!(column_name %in% cols)) {
-    return(character(0))
+  if (is.null(clauses) || !nzchar(clauses)) {
+    return(NULL)
   }
 
-  tbl_id <- dbQuoteIdentifier(con, table_name)
-  col_id <- dbQuoteIdentifier(con, column_name)
-
-  sql <- paste0(
-    "SELECT DISTINCT CAST(", col_id, " AS VARCHAR) AS val ",
-    "FROM ", tbl_id, " ",
-    "WHERE ", col_id, " IS NOT NULL ",
-    "AND CAST(", col_id, " AS VARCHAR) <> '' ",
-    "ORDER BY val ",
-    "LIMIT ", as.integer(max_values), ";"
-  )
-
-  vals <- dbGetQuery(con, sql)$val
-  vals[!is.na(vals)]
+  clauses
 }
 
-count_layer_rows <- function(con, table_name, where_clauses = character(0)) {
+count_layer_rows <- function(con, table_name, where_clause = NULL) {
   tbl_id <- dbQuoteIdentifier(con, table_name)
   sql <- paste0("SELECT COUNT(*) AS n FROM ", tbl_id)
 
-  if (length(where_clauses) > 0) {
-    sql <- paste0(sql, " WHERE ", paste(where_clauses, collapse = " AND "))
+  if (!is.null(where_clause) && nzchar(where_clause)) {
+    sql <- paste0(sql, " WHERE ", where_clause)
   }
 
   sql <- paste0(sql, ";")
   dbGetQuery(con, sql)$n[[1]]
 }
 
-read_layer_data <- function(
-    con,
-    table_name,
-    max_rows,
-    filter_col = NULL,
-    filter_val = NULL,
-    amenity_val = "All",
-    highway_val = "All",
-  leisure_val = "All",
-  poi_types = character(0)
-) {
+read_layer_data <- function(con, table_name, max_rows, where_clause = NULL) {
   tbl_id <- dbQuoteIdentifier(con, table_name)
   sql <- paste0("SELECT * FROM ", tbl_id)
 
-  where_clauses <- build_where_clauses(
-    con,
-    table_name,
-    filter_col,
-    filter_val,
-    amenity_val,
-    highway_val,
-    leisure_val,
-    poi_types
-  )
-
-  if (length(where_clauses) > 0) {
-    sql <- paste0(sql, " WHERE ", paste(where_clauses, collapse = " AND "))
+  if (!is.null(where_clause) && nzchar(where_clause)) {
+    sql <- paste0(sql, " WHERE ", where_clause)
   }
 
   sql <- paste0(sql, " LIMIT ", as.integer(max_rows), ";")
@@ -204,19 +260,18 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       selectInput("table", "Layer", choices = character(0)),
-      numericInput("max_rows", "Max features to draw", value = 5000, min = 100, max = 100000, step = 100),
-      selectInput("filter_col", "Optional attribute filter column", choices = ""),
-      textInput("filter_val", "Contains value", value = ""),
-      selectInput("amenity_val", "Amenity", choices = "All", selected = "All"),
-      selectInput("highway_val", "Highway", choices = "All", selected = "All"),
-      selectInput("leisure_val", "Leisure", choices = "All", selected = "All"),
-      checkboxGroupInput(
-        "poi_types",
-        "Quick POI filters",
-        choices = c("Hospitals" = "hospital", "Pharmacies" = "pharmacy"),
-        selected = character(0)
+      selectInput("source_type", "Tag source", choices = c("Direct column", "other_tags", "Any"), selected = "Any"),
+      conditionalPanel(
+        condition = "input.source_type == 'Direct column'",
+        selectInput("direct_tag_col", "Tag column", choices = character(0))
       ),
-      actionButton("find_health", "Find Hospitals + Pharmacies"),
+      conditionalPanel(
+        condition = "input.source_type == 'other_tags'",
+        textInput("other_tag_key", "Tag key in other_tags", value = "amenity")
+      ),
+      selectInput("value_mode", "Value match", choices = c("Contains", "Exact"), selected = "Contains"),
+      textInput("tag_value", "Tag value (supports AND/OR or &/||)", value = ""),
+      numericInput("max_rows", "Max features to draw", value = 5000, min = 100, max = 100000, step = 100),
       actionButton("reload", "Load layer")
     ),
     mainPanel(
@@ -240,60 +295,59 @@ server <- function(input, output, session) {
 
   updateSelectInput(session, "table", choices = feature_tables, selected = feature_tables[1])
 
-  observeEvent(input$find_health, {
-    if ("points" %in% feature_tables) {
-      updateSelectInput(session, "table", selected = "points")
-    }
-    updateCheckboxGroupInput(session, "poi_types", selected = c("hospital", "pharmacy"))
-    updateSelectInput(session, "amenity_val", selected = "All")
-  })
-
   observeEvent(input$table, {
     req(input$table)
-    col_choices <- get_table_columns(con, input$table)
-    updateSelectInput(session, "filter_col", choices = c("", col_choices), selected = "")
 
-    amenity_choices <- c("All", get_distinct_values(con, input$table, "amenity"))
-    highway_choices <- c("All", get_distinct_values(con, input$table, "highway"))
-    leisure_choices <- c("All", get_distinct_values(con, input$table, "leisure"))
+    direct_cols <- get_direct_tag_columns(con, input$table)
+    if (length(direct_cols) == 0) {
+      direct_cols <- ""
+    }
 
-    updateSelectInput(session, "amenity_val", choices = amenity_choices, selected = "All")
-    updateSelectInput(session, "highway_val", choices = highway_choices, selected = "All")
-    updateSelectInput(session, "leisure_val", choices = leisure_choices, selected = "All")
+    updateSelectInput(session, "direct_tag_col", choices = direct_cols, selected = direct_cols[1])
   }, ignoreInit = FALSE)
 
   layer_result <- eventReactive(input$reload, {
     req(input$table)
-
-    where_clauses <- build_where_clauses(
-      con,
-      input$table,
-      input$filter_col,
-      input$filter_val,
-      input$amenity_val,
-      input$highway_val,
-      input$leisure_val,
-      input$poi_types
-    )
+    where_clause <- if (identical(input$source_type, "Any")) {
+      build_any_clause(
+        con = con,
+        table_name = input$table,
+        value_mode = input$value_mode,
+        tag_value = input$tag_value
+      )
+    } else {
+      build_tag_clause(
+        con = con,
+        table_name = input$table,
+        source_type = input$source_type,
+        direct_tag_col = input$direct_tag_col,
+        other_tag_key = input$other_tag_key,
+        value_mode = input$value_mode,
+        tag_value = input$tag_value
+      )
+    }
 
     dat <- read_layer_data(
-      con,
-      input$table,
-      input$max_rows,
-      input$filter_col,
-      input$filter_val,
-      input$amenity_val,
-      input$highway_val,
-      input$leisure_val,
-      input$poi_types
+      con = con,
+      table_name = input$table,
+      max_rows = input$max_rows,
+      where_clause = where_clause
     )
 
     total_rows <- count_layer_rows(con, input$table)
-    matched_rows <- count_layer_rows(con, input$table, where_clauses)
+    matched_rows <- count_layer_rows(con, input$table, where_clause)
     loaded_rows <- nrow(dat)
 
     if (!"WKT_GEOMETRY" %in% names(dat)) {
       stop("Selected table does not include WKT_GEOMETRY")
+    }
+
+    tag_key_label <- if (identical(input$source_type, "Direct column")) {
+      input$direct_tag_col
+    } else if (identical(input$source_type, "other_tags")) {
+      input$other_tag_key
+    } else {
+      "(any key)"
     }
 
     if (nrow(dat) == 0) {
@@ -303,6 +357,8 @@ server <- function(input, output, session) {
           raw = dat,
           stats = data.frame(
             layer = input$table,
+            tag_source = input$source_type,
+            tag_key = tag_key_label,
             total_rows = total_rows,
             matched_rows = matched_rows,
             loaded_rows = loaded_rows,
@@ -318,6 +374,8 @@ server <- function(input, output, session) {
       raw = dat,
       stats = data.frame(
         layer = input$table,
+        tag_source = input$source_type,
+        tag_key = tag_key_label,
         total_rows = total_rows,
         matched_rows = matched_rows,
         loaded_rows = loaded_rows,
