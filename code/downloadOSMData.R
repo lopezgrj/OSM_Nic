@@ -1,82 +1,71 @@
-# Download OSM file
-# Specify URL where file is stored
-url <- "http://download.geofabrik.de/central-america/nicaragua-latest.osm.pbf"
+download_osm_data <- function(
+  project_dir = getwd(),
+  source_url = "https://download.geofabrik.de/central-america/nicaragua-latest.osm.pbf",
+  file_name = "nicaragua-latest.osm.pbf",
+  progress_callback = NULL
+) {
+  raw_data_dir <- file.path(project_dir, "raw_data")
+  dir.create(raw_data_dir, recursive = TRUE, showWarnings = FALSE)
 
-raw_data_dir <- "./raw_data"
-destfile <- file.path(raw_data_dir, "nicaragua-latest.osm.pbf")
-# Apply download.file function in R
-download.file(url, destfile)
+  destfile <- file.path(raw_data_dir, file_name)
+  temporary_file <- tempfile("geofabrik-", tmpdir = raw_data_dir, fileext = ".pbf")
+  on.exit(unlink(temporary_file), add = TRUE)
 
-
-# Record the run timestamp for downstream checks and automation.
-last_download_path <- file.path(raw_data_dir, "lastdownloadOSMData.txt")
-last_download_text <- format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
-writeLines(last_download_text, con = last_download_path)
-
-# OGR2OGR
-system("ogr2ogr -f SQLite -lco FORMAT=WKT ./data/nicaragua.sqlite ./raw_data/nicaragua-latest.osm.pbf", intern=T)
-
-
-# Record the run timestamp for downstream checks and automation.
-last_update_path <- "./data/lastupdate.txt"
-last_update_text <- format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")
-writeLines(last_update_text, con = last_update_path)
-
-library(DBI)
-library(duckdb)
-con <- dbConnect(duckdb(), dbdir = "./data/nicaragua.duckdb")
-dbExecute(con, "INSTALL spatial;")
-dbExecute(con, "LOAD spatial;")
-dbExecute(con, "INSTALL sqlite;")
-dbExecute(con, "LOAD sqlite;")
-dbExecute(con, "ATTACH './data/nicaragua.sqlite' AS osm_sqlite (TYPE sqlite);")
-
-# Copy every OSM table produced by ogr2ogr into the DuckDB database.
-source_tables <- dbGetQuery(
-  con,
-  "
-  SELECT table_name
-  FROM information_schema.tables
-  WHERE table_catalog = 'osm_sqlite'
-    AND table_schema = 'main'
-    AND table_type = 'BASE TABLE'
-  ORDER BY table_name;
-  "
-)
-
-if (nrow(source_tables) == 0) {
-  stop("No source tables found in ./data/nicaragua.sqlite. Check ogr2ogr output.")
-}
-
-for (tbl_name in source_tables$table_name) {
-  dst_tbl <- dbQuoteIdentifier(con, tbl_name)
-  src_tbl <- dbQuoteIdentifier(con, tbl_name)
-  dbExecute(
-    con,
-    paste0(
-      "CREATE OR REPLACE TABLE ",
-      dst_tbl,
-      " AS SELECT * FROM osm_sqlite.",
-      src_tbl,
-      ";"
+  if (requireNamespace("curl", quietly = TRUE)) {
+    handle <- curl::new_handle()
+    curl::handle_setopt(
+      handle,
+      proxy = "",
+      followlocation = TRUE,
+      timeout = 3600,
+      connecttimeout = 60,
+      low_speed_time = 120,
+      low_speed_limit = 1024
     )
-  )
+    if (!is.null(progress_callback)) {
+      curl::handle_setopt(
+        handle,
+        progressfunction = function(downloaded, uploaded) {
+          if (downloaded[1] > 0) {
+            progress_callback(min(downloaded[2] / downloaded[1], 1))
+          }
+          TRUE
+        }
+      )
+    }
+
+    response <- tryCatch(
+      curl::curl_fetch_disk(source_url, temporary_file, handle = handle),
+      error = function(error) {
+        stop("Geofabrik transfer failed: ", error$message, call. = FALSE)
+      }
+    )
+    download_status <- if (
+      response$status_code == 0 ||
+        (response$status_code >= 200 && response$status_code < 300)
+    ) 0 else 1
+  } else {
+    old_timeout <- getOption("timeout")
+    options(timeout = 3600)
+    on.exit(options(timeout = old_timeout), add = TRUE)
+    download_status <- download.file(source_url, temporary_file, mode = "wb")
+  }
+  temporary_size <- file.info(temporary_file)$size
+  if (download_status != 0 || is.na(temporary_size) || temporary_size == 0) {
+    http_status <- if (exists("response") && !is.null(response)) response$status_code else "unknown"
+    stop(
+      "PBF download failed or produced an empty file (HTTP status ",
+      http_status,
+      ").",
+      call. = FALSE
+    )
+  }
+
+  if (!file.rename(temporary_file, destfile)) {
+    stop("Could not replace the existing PBF at ", destfile, ".")
+  }
+
+  last_download_path <- file.path(raw_data_dir, "lastdownloadOSMData.txt")
+  writeLines(format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z"), con = last_download_path)
+  invisible(destfile)
 }
-
-dbExecute(con, "DETACH osm_sqlite;")
-
-# Validation: list saved tables in the DuckDB main schema.
-saved_tables <- dbGetQuery(
-  con,
-  "
-  SELECT table_name
-  FROM information_schema.tables
-  WHERE table_schema = 'main'
-    AND table_type = 'BASE TABLE'
-  ORDER BY table_name;
-  "
-)
-print(saved_tables)
-
-dbDisconnect(con, shutdown = TRUE)
-
