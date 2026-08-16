@@ -5,8 +5,9 @@ This project builds and explores OpenStreetMap (OSM) data for Nicaragua using Du
 ## Quick Start
 
 ```r
-install.packages(c("shiny", "DBI", "duckdb", "sf", "leaflet"))
-source("code/downloadOSMData.R")
+install.packages(c("shiny", "DBI", "duckdb", "sf", "leaflet", "curl", "jsonlite"))
+source("code/downloadOSMData.R"); download_osm_data()
+source("code/importOSMData.R"); import_osm_data()
 shiny::runApp("app.R")
 ```
 
@@ -24,9 +25,11 @@ If you generate those artifacts locally, they are governed by OpenStreetMap's OD
 
 ## Project Layout
 
-- [code/downloadOSMData.R](code/downloadOSMData.R): pipeline from OSM PBF to SQLite and DuckDB.
+- [code/downloadOSMData.R](code/downloadOSMData.R): downloads the Nicaragua OSM PBF extract.
+- [code/importOSMData.R](code/importOSMData.R): converts the PBF into SQLite, then copies its tables into DuckDB.
 - [code/downloadTaginfodb.R](code/downloadTaginfodb.R): downloads and converts Taginfo DB into DuckDB.
 - [app.R](app.R): app launcher (opens in external browser when run from RStudio).
+- [geofabrik_downloader_app.R](geofabrik_downloader_app.R): Shiny app for downloading Geofabrik PBF extracts.
 - [osm_plot_app.R](osm_plot_app.R): main interactive map/filter/export app.
 - [osm_db_explorer_app.R](osm_db_explorer_app.R): schema/table exploration app.
 - [osm_tag_explorer_app.R](osm_tag_explorer_app.R): tag exploration across direct columns and `other_tags`.
@@ -46,13 +49,38 @@ R packages:
 
 Pipeline helpers may also use GDAL/OGR (`ogr2ogr`) depending on your ingestion path.
 
+Install GDAL/OGR before importing; on macOS with Homebrew:
+
+```sh
+brew install gdal
+```
+
+Install the DuckDB extensions once before the first import:
+
+```r
+con <- DBI::dbConnect(duckdb::duckdb())
+DBI::dbExecute(con, "INSTALL spatial;")
+DBI::dbExecute(con, "INSTALL sqlite;")
+DBI::dbDisconnect(con, shutdown = TRUE)
+```
+
 ## Build Or Refresh Data
 
-Run the OSM pipeline:
+Download the OSM PBF extract:
 
 ```r
 source("code/downloadOSMData.R")
+download_osm_data()
 ```
+
+Import the downloaded PBF into SQLite and DuckDB:
+
+```r
+source("code/importOSMData.R")
+import_osm_data()
+```
+
+Both functions accept `project_dir` (default: the current working directory) and `source_url` arguments. For example, run `import_osm_data(project_dir = "/path/to/OSM_Nic")` from another R working directory.
 
 Optional: download and convert Taginfo database:
 
@@ -67,6 +95,18 @@ Start the main app:
 ```r
 shiny::runApp("app.R")
 ```
+
+## Run Geofabrik Downloader
+
+Start the download app from the project root:
+
+```r
+shiny::runApp("geofabrik_downloader_app.R")
+```
+
+The app loads Geofabrik's live catalog of available PBF extracts. Choose an extract
+from the searchable list to populate its URL and file name, or enter a URL manually.
+The default selection downloads the latest Nicaragua extract into `raw_data/`.
 
 `app.R` forces external browser launch in interactive RStudio sessions to avoid Viewer-specific issues.
 
