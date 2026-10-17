@@ -68,90 +68,80 @@ parse_other_tags <- function(tag_strings) {
 }
 
 get_other_tags_counts <- function(con, table_name, parse_limit) {
-  tryCatch({
-    cols <- get_table_columns(con, table_name)
-    if (!("other_tags" %in% cols)) {
-      return(data.frame())
-    }
+  cols <- get_table_columns(con, table_name)
+  if (!("other_tags" %in% cols)) {
+    return(data.frame())
+  }
 
-    other_tags <- dbGetQuery(
-      con,
-      paste0(
-        "SELECT other_tags FROM ",
-        dbQuoteIdentifier(con, table_name),
-        " WHERE other_tags IS NOT NULL LIMIT ",
-        as.integer(parse_limit),
-        ";"
-      )
-    )$other_tags
-
-    pairs <- parse_other_tags(other_tags)
-    if (nrow(pairs) == 0) {
-      return(data.frame())
-    }
-
-    counts <- as.data.frame(table(pairs$key, pairs$value), stringsAsFactors = FALSE)
-    counts <- counts[counts$Freq > 0, , drop = FALSE]
-    names(counts) <- c("tag_key", "tag_value", "n")
-
-    data.frame(
-      table_name = table_name,
-      feature_group = infer_feature_group(table_name),
-      storage_source = "other_tags",
-      tag_key = counts$tag_key,
-      tag_value = counts$tag_value,
-      n = as.numeric(counts$n),
-      stringsAsFactors = FALSE
+  other_tags <- dbGetQuery(
+    con,
+    paste0(
+      "SELECT other_tags FROM ",
+      dbQuoteIdentifier(con, table_name),
+      " WHERE other_tags IS NOT NULL LIMIT ",
+      as.integer(parse_limit),
+      ";"
     )
-  }, error = function(e) {
-    warning(paste("Error in get_other_tags_counts for table", table_name, ":", e$message))
-    data.frame()
-  })
+  )$other_tags
+
+  pairs <- parse_other_tags(other_tags)
+  if (nrow(pairs) == 0) {
+    return(data.frame())
+  }
+
+  counts <- as.data.frame(table(pairs$key, pairs$value), stringsAsFactors = FALSE)
+  counts <- counts[counts$Freq > 0, , drop = FALSE]
+  names(counts) <- c("tag_key", "tag_value", "n")
+
+  data.frame(
+    table_name = table_name,
+    feature_group = infer_feature_group(table_name),
+    storage_source = "other_tags",
+    tag_key = counts$tag_key,
+    tag_value = counts$tag_value,
+    n = as.numeric(counts$n),
+    stringsAsFactors = FALSE
+  )
 }
 
 get_direct_tag_counts <- function(con, table_name) {
-  tryCatch({
-    cols <- get_table_columns(con, table_name)
-    candidate_cols <- setdiff(cols, c(NON_TAG_COLUMNS, "other_tags"))
+  cols <- get_table_columns(con, table_name)
+  candidate_cols <- setdiff(cols, c(NON_TAG_COLUMNS, "other_tags"))
 
-    if (length(candidate_cols) == 0) {
-      return(data.frame())
-    }
+  if (length(candidate_cols) == 0) {
+    return(data.frame())
+  }
 
-    counts <- lapply(candidate_cols, function(col_name) {
-      tbl_id <- dbQuoteIdentifier(con, table_name)
-      col_id <- dbQuoteIdentifier(con, col_name)
+  counts <- lapply(candidate_cols, function(col_name) {
+    tbl_id <- dbQuoteIdentifier(con, table_name)
+    col_id <- dbQuoteIdentifier(con, col_name)
 
-      dbGetQuery(
-        con,
-        paste0(
-          "SELECT ",
-          dbQuoteString(con, table_name), " AS table_name, ",
-          dbQuoteString(con, infer_feature_group(table_name)), " AS feature_group, ",
-          dbQuoteString(con, "direct_column"), " AS storage_source, ",
-          dbQuoteString(con, col_name), " AS tag_key, ",
-          "CAST(", col_id, " AS VARCHAR) AS tag_value, ",
-          "COUNT(*) AS n ",
-          "FROM ", tbl_id, " ",
-          "WHERE ", col_id, " IS NOT NULL ",
-          "AND CAST(", col_id, " AS VARCHAR) <> '' ",
-          "GROUP BY 5"
-        )
+    dbGetQuery(
+      con,
+      paste0(
+        "SELECT ",
+        dbQuoteString(con, table_name), " AS table_name, ",
+        dbQuoteString(con, infer_feature_group(table_name)), " AS feature_group, ",
+        dbQuoteString(con, "direct_column"), " AS storage_source, ",
+        dbQuoteString(con, col_name), " AS tag_key, ",
+        "CAST(", col_id, " AS VARCHAR) AS tag_value, ",
+        "COUNT(*) AS n ",
+        "FROM ", tbl_id, " ",
+        "WHERE ", col_id, " IS NOT NULL ",
+        "AND CAST(", col_id, " AS VARCHAR) <> '' ",
+        "GROUP BY 5"
       )
-    })
-
-    counts <- counts[vapply(counts, nrow, integer(1)) > 0]
-    if (length(counts) == 0) {
-      return(data.frame())
-    }
-
-    result <- do.call(rbind, counts)
-    result$n <- as.numeric(result$n)
-    result
-  }, error = function(e) {
-    warning(paste("Error in get_direct_tag_counts for table", table_name, ":", e$message))
-    data.frame()
+    )
   })
+
+  counts <- counts[vapply(counts, nrow, integer(1)) > 0]
+  if (length(counts) == 0) {
+    return(data.frame())
+  }
+
+  result <- do.call(rbind, counts)
+  result$n <- as.numeric(result$n)
+  result
 }
 
 get_all_tag_counts <- function(con, parse_limit) {
@@ -161,21 +151,16 @@ get_all_tag_counts <- function(con, parse_limit) {
   }
 
   all_parts <- lapply(tables, function(tbl) {
-    tryCatch({
-      direct <- get_direct_tag_counts(con, tbl)
-      other <- get_other_tags_counts(con, tbl, parse_limit)
+    direct <- get_direct_tag_counts(con, tbl)
+    other <- get_other_tags_counts(con, tbl, parse_limit)
 
-      parts <- list(direct, other)
-      parts <- parts[vapply(parts, nrow, integer(1)) > 0]
+    parts <- list(direct, other)
+    parts <- parts[vapply(parts, nrow, integer(1)) > 0]
 
-      if (length(parts) == 0) {
-        return(data.frame())
-      }
-      do.call(rbind, parts)
-    }, error = function(e) {
-      warning(paste("Error processing table", tbl, ":", e$message))
-      data.frame()
-    })
+    if (length(parts) == 0) {
+      return(data.frame())
+    }
+    do.call(rbind, parts)
   })
 
   all_parts <- all_parts[vapply(all_parts, nrow, integer(1)) > 0]
@@ -813,7 +798,18 @@ server <- function(input, output, session) {
         stop("No features to export for the current filter.")
       }
 
+      wkt_geometry <- trimws(as.character(export_df$WKT_GEOMETRY))
+      if (!any(!is.na(wkt_geometry) & nzchar(wkt_geometry))) {
+        stop("No geometry is available to export for the current filter.")
+      }
+
       export_sf <- st_as_sf(export_df, wkt = "WKT_GEOMETRY", crs = 4326)
+      geometry <- st_geometry(export_sf)
+      has_geometry <- !is.na(geometry) & !st_is_empty(geometry)
+      if (!any(has_geometry)) {
+        stop("No geometry is available to export for the current filter.")
+      }
+
       layer_name <- gsub("[^A-Za-z0-9_]+", "_", input$table)
       st_write(export_sf, dsn = file, layer = layer_name, delete_dsn = TRUE, quiet = TRUE)
     }
@@ -829,7 +825,7 @@ server <- function(input, output, session) {
       counts
     }, error = function(e) {
       showNotification(paste("Error loading tags:", e$message), type = "error", duration = 5)
-      data.frame()
+      stop(e)
     })
   }, ignoreInit = TRUE)
 

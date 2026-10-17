@@ -7,9 +7,11 @@ extract into local databases, and provides Shiny interfaces for mapping,
 searching, and inspecting the resulting data. It is intended for local data
 exploration and analysis, not as a hosted or multi-user production service.
 
-This document describes the behavior implemented in the repository. It does
-not imply that untracked data files or applications are part of the delivered
-project.
+This is an as-built specification: Section 5 describes the implemented
+baseline, and Section 10 gives checks for that baseline. It does not imply
+that untracked data files or applications are part of the delivered project.
+Proposed behavior that is not implemented must be identified separately as a
+planned change rather than described as current behavior.
 
 ## 2. Scope
 
@@ -66,7 +68,12 @@ artifacts; they are not required to be committed to source control. The
 application and import scripts expect to be run with the project root as the
 working directory unless a helper explicitly accepts a `project_dir`.
 
-## 5. Functional requirements
+## 5. Implemented functional baseline
+
+The requirements below describe behavior present in the current code. They
+are baseline acceptance criteria, not a promise that every edge case has an
+automated test. Known limitations and behavior that should not be mistaken
+for guarantees are called out explicitly.
 
 ### 5.1 PBF download helper
 
@@ -148,6 +155,32 @@ The Map Explorer tab in `app.R` shall:
   GeoPackage. The export shall fail visibly if there is no matching feature
   data or geometry.
 
+#### Filter and export semantics
+
+- Matching is case-insensitive. **Contains** uses SQL `LIKE` patterns; `%` and
+  `_` in a search term therefore act as wildcards rather than literal
+  characters. **Exact** compares the complete value, ignoring case.
+- `AND` binds more tightly than `OR`; `&` is equivalent to `AND` and `||` is
+  equivalent to `OR`. Matching outer single or double quotes protect operator
+  words from being parsed as operators and are removed from the search term.
+- In **Direct column** and **other_tags** modes, all terms in an `AND` group
+  must match the selected column or serialized `other_tags` search. The
+  `other_tags` **Contains** query searches the serialized tag text after the
+  selected key; a match in a later tag can therefore satisfy the search even
+  if that text is not in the selected key's value. In **Any** mode, each term
+  may match a different direct column or the serialized `other_tags` field.
+- With an empty value, **Direct column** matches non-empty values in the
+  selected column, **other_tags** matches rows containing the selected key,
+  and **Any** matches rows with at least one non-empty tag field.
+- Map results, statistics, and preview are refreshed by **Load layer**.
+  Changing filter controls does not apply them until that action is used.
+  Export should be initiated after loading the intended layer and filters so
+  its query corresponds to the displayed result. The current handler uses the
+  last loaded filter clause with the currently selected layer; changing the
+  layer without loading it again can result in a mismatched export query.
+- The row limit is applied without an explicit ordering, so which features
+  appear when matches exceed the limit is not guaranteed to be stable.
+
 ### 5.5 Primary Shiny app: tag explorer
 
 The Tag Explorer tab in `app.R` shall:
@@ -163,10 +196,17 @@ The Tag Explorer tab in `app.R` shall:
 - Recompute summaries on refresh or when the parsing limit changes.
 - Report summary-loading errors through an error notification.
 
+The primary app defers the initial tag-summary computation; use **Refresh**
+or change the parsing limit to populate the Tag Explorer. The standalone tag
+explorer computes summaries on startup.
+
 Feature groups are inferred from conventional layer names: points, lines and
 multilinestrings, multipolygons, other_relations, or other.
-`other_tags` summaries are based on the configured sample limit, so they may
-not represent every row in a large table.
+Direct-column summaries scan all rows. `other_tags` summaries examine up to
+the configured number of non-null rows per table; the query does not specify
+an order, so the subset may be incomplete and is not guaranteed to be
+repeatable. Counts from `other_tags` therefore may not represent every row in
+a large table.
 
 ### 5.6 Standalone database explorer
 
@@ -230,8 +270,10 @@ when downloading, distributing, or using generated data.
 Required R packages vary by entry point:
 
 - Main app: `shiny`, `DBI`, `duckdb`, `sf`, and `leaflet`.
-- Geofabrik downloader app/helper: `shiny`, `jsonlite`, and `curl` (the
-  helper has a `download.file()` fallback if the `curl` R package is absent).
+- Geofabrik downloader app: `shiny` and `jsonlite`; the catalog loader also
+  requires the `curl` command-line executable and `env` on `PATH`.
+- PBF download helper: the R `curl` package is optional; if it is absent, the
+  helper uses `download.file()`.
 - Database explorer: `shiny`, `DBI`, and `duckdb`.
 - Tag explorer: `shiny`, `DBI`, and `duckdb`.
 - Import: `DBI`, `duckdb`, GDAL/OGR `ogr2ogr`, plus DuckDB `spatial` and
@@ -239,12 +281,56 @@ Required R packages vary by entry point:
 - Example analysis: `sf`, `terra`, and `ggplot2`.
 
 Internet access is required for source downloads and for the map's online
-OpenStreetMap Mapnik tiles. The applications use project-relative database paths,
-so run them from the project root. The repository targets a local R
+OpenStreetMap Mapnik tiles. The applications use project-relative database
+paths, so run them from the project root. The repository targets a local R
 environment; no deployment, authentication, authorization, or concurrent
 writer behavior is specified.
 
-## 8. Operational and quality requirements
+## 8. Quick start
+
+Run the following commands from the project root. Install the packages
+required by the entry point you intend to use; the full set is listed in
+Section 7.
+
+Download and import the standard Nicaragua extract:
+
+```r
+source("code/downloadOSMData.R")
+download_osm_data()
+
+source("code/importOSMData.R")
+import_osm_data()
+```
+
+Before importing, ensure `ogr2ogr` is on `PATH`, the `data/` directory
+exists, and DuckDB's `spatial` and `sqlite` extensions are available. If
+needed, install those extensions once:
+
+```r
+con <- DBI::dbConnect(duckdb::duckdb())
+DBI::dbExecute(con, "INSTALL spatial;")
+DBI::dbExecute(con, "INSTALL sqlite;")
+DBI::dbDisconnect(con, shutdown = TRUE)
+```
+
+The map and tag explorers require `data/nicaragua.duckdb` to exist. Launch
+the applications from the project root:
+
+```r
+shiny::runApp("app.R")
+shiny::runApp("geofabrik_downloader_app.R")
+shiny::runApp("osm_db_explorer_app.R")
+shiny::runApp("osm_tag_explorer_app.R")
+```
+
+The Geofabrik downloader can be used independently to obtain a PBF extract.
+The optional Taginfo download is run separately:
+
+```r
+source("code/downloadTaginfodb.R")
+```
+
+## 9. Operational and quality requirements
 
 - Database explorer and Shiny query connections shall be read-only.
 - Downloads and database imports shall surface errors rather than silently
@@ -258,7 +344,42 @@ writer behavior is specified.
 - The applications are designed for an interactive local user and do not
   promise multi-user isolation or concurrent database refreshes.
 
-## 9. Out of scope
+## 10. Baseline acceptance checks
+
+These checks describe observable outcomes for a local acceptance run. They
+can be performed manually; this repository does not currently define an
+automated test suite for the Shiny workflows.
+
+1. **Download:** With network access, download a PBF to `raw_data/`; confirm
+   the file is non-empty and `raw_data/lastdownloadOSMData.txt` is written.
+   A failed or empty transfer must not be reported as a successful download.
+2. **Import:** With the PBF, `data/`, `ogr2ogr`, and required DuckDB extensions
+   available, run the importer and confirm `data/nicaragua.sqlite`,
+   `data/nicaragua.duckdb`, `data/lastupdate.txt`, and
+   `osm_import_metadata` are present or updated.
+3. **Map startup:** With a valid DuckDB containing at least one table with
+   `WKT_GEOMETRY`, start `app.R`; confirm the Map Explorer loads a layer and
+   its map uses the OpenStreetMap Mapnik basemap.
+4. **Filtering and display limit:** Use a controlled database or dataset with
+   known matching features. Load a layer with a known filter and
+   confirm `matched_rows` reflects the filter while `loaded_rows` does not
+   exceed the selected map limit. Confirm the preview contains no more than
+   ten rows and excludes `WKT_GEOMETRY`.
+5. **Export:** Export a filter matching more rows than the map limit. Confirm
+   the GeoPackage contains all matching rows; confirm an empty match is
+   reported as an export error.
+6. **Tag summaries:** Refresh the Tag Explorer and confirm that changing the
+   `other_tags` parse limit triggers recomputation. Check that results include
+   direct-column counts and sampled `other_tags` counts, without treating the
+   latter as complete-table counts.
+7. **Database explorer:** With a valid database, confirm tables, columns, and
+   sample rows are shown; with no main-schema tables, confirm the app reports
+   an explicit error.
+8. **Downloader app:** Refresh the catalog and confirm selection populates
+   URL/file name. Confirm invalid URLs and file names are rejected and a
+   successful download is reported with file information.
+
+## 11. Out of scope
 
 - Hosting or deploying the apps as a public service.
 - User accounts, authentication, or access-control roles.
