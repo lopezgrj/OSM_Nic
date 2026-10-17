@@ -239,7 +239,7 @@ Required R packages vary by entry point:
 - Example analysis: `sf`, `terra`, and `ggplot2`.
 
 Internet access is required for source downloads and for the map's online
-CartoDB Positron tiles. The applications use project-relative database paths,
+OpenStreetMap Mapnik tiles. The applications use project-relative database paths,
 so run them from the project root. The repository targets a local R
 environment; no deployment, authentication, authorization, or concurrent
 writer behavior is specified.

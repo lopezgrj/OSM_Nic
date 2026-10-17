@@ -546,7 +546,7 @@ ui <- fluidPage(
             "Contains matches partial text; Exact matches the full value."
           ),
           with_hover_info(
-            textInput("tag_value", "Tag value (supports AND/OR or &/||; quote literals like \"or\")", value = ""),
+            textInput("tag_value", "Tag value (AND/OR or &/||; \" or \" literals)", value = ""),
             "Filter expression. Use AND/OR or &/||. Quote literals like \"or\" when searching those words."
           ),
           with_hover_info(
@@ -752,14 +752,14 @@ server <- function(input, output, session) {
     if (nrow(sf_obj) == 0) {
       return(
         leaflet() %>%
-          addProviderTiles(providers$CartoDB.Positron)
+          addProviderTiles(providers$OpenStreetMap.Mapnik)
       )
     }
 
     geom_types <- unique(as.character(st_geometry_type(sf_obj)))
 
     base_map <- leaflet(sf_obj) %>%
-      addProviderTiles(providers$CartoDB.Positron)
+      addProviderTiles(providers$OpenStreetMap.Mapnik)
 
     label_col <- if ("name" %in% names(sf_obj)) "name" else if ("osm_id" %in% names(sf_obj)) "osm_id" else names(sf_obj)[1]
     label_values <- as.character(sf_obj[[label_col]])
