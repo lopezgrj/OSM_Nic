@@ -94,9 +94,10 @@ project root unless a helper accepts an explicit `project_dir`.
 
 ### 5.1 Reference environment
 
-The following environment was recorded on 2026-10-18 and is the supported
-reference baseline until a broader automated compatibility matrix exists.
-Versions older than this baseline are not guaranteed.
+The following development environment was observed on 2026-10-18. These
+versions identify the environment used for local inspection; they are not a
+validated compatibility baseline. Versions outside this environment are not
+guaranteed until automated compatibility checks exist.
 
 | Component | Reference version |
 |---|---:|
@@ -446,8 +447,9 @@ generated databases, exports, or derivative works.
 - **KL-007:** Import creates or replaces discovered DuckDB tables but does not
   remove obsolete feature tables absent from a later import.
 - **KL-008:** GeoPackage export loads every matching row into memory.
-- **KL-009:** Compatibility is validated only against the reference
-  environment in Section 5; no multi-platform CI matrix exists.
+- **KL-009:** Compatibility has not been validated across environments. The
+  observed development environment is recorded in Section 5, but no
+  multi-platform CI matrix exists.
 - **KL-010:** The repository does not currently provide an automated test
   suite or a committed deterministic fixture database.
 
@@ -501,7 +503,7 @@ added, the following checks form the manual baseline.
 | A-05 Import conversion failure | IMP-003, ERR-003, ERR-005 | Force `ogr2ogr` failure while an existing SQLite database is present | Explicit error; existing SQLite unchanged; temporary file absent |
 | A-06 DuckDB rollback | IMP-005, IMP-006, ERR-004 | Force a table-copy failure inside the transaction | Explicit error; no partial DuckDB transaction committed |
 | A-07 Map startup | MAP-001, MAP-002, MAP-010 | Start `app.R` with at least one WKT table | Layer is selectable and Mapnik basemap renders |
-| A-08 Filter semantics | MAP-003–MAP-008 | Use fixture rows covering exact, contains, AND, OR, symbols, and quoted operators | Matching count equals fixture expectations |
+| A-08 Filter semantics | MAP-003–MAP-008 | Use a controlled database with documented rows covering exact, contains, AND, OR, symbols, and quoted operators | Matching count equals the documented expected count for each expression |
 | A-09 Display bound | MAP-009, MAP-011, NFR-002 | Match more rows than the selected limit | Loaded rows do not exceed limit; preview has at most ten rows and no WKT column |
 | A-10 Export | MAP-012, MAP-013 | Export more matches than the map limit, then export an empty match | GeoPackage contains every match; empty match reports an error |
 | A-11 Tag summaries | TAG-001–TAG-006 | Refresh summaries and change parse limit | Direct and sampled counts appear; limit change recomputes; errors are visible |

@@ -59,19 +59,27 @@ import_osm_data <- function(
   source_tables <- dbGetQuery(
     con,
     "
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_catalog = 'osm_sqlite'
-      AND table_schema = 'main'
-      AND table_type = 'BASE TABLE'
-      AND table_name NOT IN ('geometry_columns', 
-                             'spatial_ref_sys',
-                             'sqlite_sequence')
-    ORDER BY table_name;
+    SELECT tables.table_name
+    FROM information_schema.tables AS tables
+    WHERE tables.table_catalog = 'osm_sqlite'
+      AND tables.table_schema = 'main'
+      AND tables.table_type = 'BASE TABLE'
+      AND tables.table_name NOT IN ('geometry_columns',
+                                    'spatial_ref_sys',
+                                    'sqlite_sequence')
+      AND EXISTS (
+        SELECT 1
+        FROM information_schema.columns AS columns
+        WHERE columns.table_catalog = tables.table_catalog
+          AND columns.table_schema = tables.table_schema
+          AND columns.table_name = tables.table_name
+          AND columns.column_name = 'WKT_GEOMETRY'
+      )
+    ORDER BY tables.table_name;
     "
   )
   if (nrow(source_tables) == 0) {
-    stop("No OSM feature tables found in ", sqlite_path, ".")
+    stop("No OSM feature tables with WKT_GEOMETRY found in ", sqlite_path, ".")
   }
 
   dbBegin(con)

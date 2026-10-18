@@ -206,6 +206,21 @@ apply_filters <- function(df, table_filter, feature_filter, key_filter, value_fi
 	filtered
 }
 
+validate_integer_range <- function(value, minimum, maximum, label) {
+	if (
+		length(value) != 1 ||
+			is.na(value) ||
+			!is.finite(value) ||
+			value != floor(value) ||
+			value < minimum ||
+			value > maximum
+	) {
+		stop(label, " must be a whole number from ", minimum, " through ", maximum, ".")
+	}
+
+	as.integer(value)
+}
+
 ui <- fluidPage(
 	titlePanel("Nicaragua OSM Tag Explorer"),
 	sidebarLayout(
@@ -275,7 +290,13 @@ server <- function(input, output, session) {
 	onStop(function() dbDisconnect(con, shutdown = TRUE))
 
 	all_tag_counts <- eventReactive(list(input$refresh, input$parse_limit), {
-		counts <- get_all_tag_counts(con, input$parse_limit)
+		parse_limit <- validate_integer_range(
+			input$parse_limit,
+			100,
+			500000,
+			"other_tags parsing limit"
+		)
+		counts <- get_all_tag_counts(con, parse_limit)
 		if (nrow(counts) == 0) {
 			return(data.frame())
 		}

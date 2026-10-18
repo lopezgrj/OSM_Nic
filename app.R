@@ -469,6 +469,21 @@ count_layer_rows <- function(con, table_name, where_clause = NULL) {
   dbGetQuery(con, sql)$n[[1]]
 }
 
+validate_integer_range <- function(value, minimum, maximum, label) {
+  if (
+    length(value) != 1 ||
+      is.na(value) ||
+      !is.finite(value) ||
+      value != floor(value) ||
+      value < minimum ||
+      value > maximum
+  ) {
+    stop(label, " must be a whole number from ", minimum, " through ", maximum, ".")
+  }
+
+  as.integer(value)
+}
+
 read_layer_data <- function(con, table_name, max_rows, where_clause = NULL) {
   tbl_id <- dbQuoteIdentifier(con, table_name)
   sql <- paste0("SELECT * FROM ", tbl_id)
@@ -495,6 +510,67 @@ read_layer_data_all <- function(con, table_name, where_clause = NULL) {
 
 with_hover_info <- function(control, help_text) {
   tags$div(title = help_text, control)
+}
+
+build_feature_map <- function(sf_obj) {
+  base_map <- leaflet() %>%
+    addProviderTiles(providers$OpenStreetMap.Mapnik)
+
+  if (nrow(sf_obj) == 0) {
+    return(base_map)
+  }
+
+  geom_types <- as.character(st_geometry_type(sf_obj))
+  supported_types <- c(
+    "POINT", "MULTIPOINT",
+    "LINESTRING", "MULTILINESTRING",
+    "POLYGON", "MULTIPOLYGON"
+  )
+  unsupported_types <- unique(geom_types[is.na(geom_types) | !(geom_types %in% supported_types)])
+  if (length(unsupported_types) > 0) {
+    stop(
+      "Unsupported or missing geometry type: ",
+      paste(ifelse(is.na(unsupported_types), "NA", unsupported_types), collapse = ", ")
+    )
+  }
+
+  label_col <- if ("name" %in% names(sf_obj)) "name" else if ("osm_id" %in% names(sf_obj)) "osm_id" else names(sf_obj)[1]
+  label_values <- as.character(sf_obj[[label_col]])
+  point_rows <- geom_types %in% c("POINT", "MULTIPOINT")
+  line_rows <- geom_types %in% c("LINESTRING", "MULTILINESTRING")
+  polygon_rows <- geom_types %in% c("POLYGON", "MULTIPOLYGON")
+
+  if (any(point_rows)) {
+    base_map <- addCircleMarkers(
+      base_map,
+      data = sf_obj[point_rows, , drop = FALSE],
+      radius = 4,
+      stroke = FALSE,
+      fillOpacity = 0.7,
+      label = label_values[point_rows]
+    )
+  }
+  if (any(line_rows)) {
+    base_map <- addPolylines(
+      base_map,
+      data = sf_obj[line_rows, , drop = FALSE],
+      weight = 2,
+      color = "#1b9e77",
+      label = label_values[line_rows]
+    )
+  }
+  if (any(polygon_rows)) {
+    base_map <- addPolygons(
+      base_map,
+      data = sf_obj[polygon_rows, , drop = FALSE],
+      weight = 1,
+      color = "#2c7fb8",
+      fillOpacity = 0.4,
+      label = label_values[polygon_rows]
+    )
+  }
+
+  base_map
 }
 
 ui <- fluidPage(
@@ -648,6 +724,7 @@ server <- function(input, output, session) {
 
   layer_result <- eventReactive(input$reload, {
     req(input$table)
+    max_rows <- validate_integer_range(input$max_rows, 100, 100000, "Map row limit")
     where_clause <- if (identical(input$source_type, "Any")) {
       build_any_clause(
         con = con,
@@ -670,7 +747,7 @@ server <- function(input, output, session) {
     dat <- read_layer_data(
       con = con,
       table_name = input$table,
-      max_rows = input$max_rows,
+      max_rows = max_rows,
       where_clause = where_clause
     )
 
@@ -731,39 +808,7 @@ server <- function(input, output, session) {
   }, striped = TRUE, bordered = TRUE, width = "100%")
 
   output$map <- renderLeaflet({
-    obj <- layer_result()
-    sf_obj <- obj$sf
-
-    if (nrow(sf_obj) == 0) {
-      return(
-        leaflet() %>%
-          addProviderTiles(providers$OpenStreetMap.Mapnik)
-      )
-    }
-
-    geom_types <- unique(as.character(st_geometry_type(sf_obj)))
-
-    base_map <- leaflet(sf_obj) %>%
-      addProviderTiles(providers$OpenStreetMap.Mapnik)
-
-    label_col <- if ("name" %in% names(sf_obj)) "name" else if ("osm_id" %in% names(sf_obj)) "osm_id" else names(sf_obj)[1]
-    label_values <- as.character(sf_obj[[label_col]])
-
-    if (all(geom_types %in% c("POINT", "MULTIPOINT"))) {
-      base_map %>%
-        addCircleMarkers(
-          radius = 4,
-          stroke = FALSE,
-          fillOpacity = 0.7,
-          label = label_values
-        )
-    } else if (all(geom_types %in% c("LINESTRING", "MULTILINESTRING"))) {
-      base_map %>%
-        addPolylines(weight = 2, color = "#1b9e77", label = label_values)
-    } else {
-      base_map %>%
-        addPolygons(weight = 1, color = "#2c7fb8", fillOpacity = 0.4, label = label_values)
-    }
+    build_feature_map(layer_result()$sf)
   })
 
   output$preview <- renderTable({
@@ -781,44 +826,59 @@ server <- function(input, output, session) {
       paste0(tbl, "_filtered.gpkg")
     },
     content = function(file) {
-      obj <- layer_result()
-      where_clause <- obj$where_clause
+      tryCatch({
+        obj <- layer_result()
+        where_clause <- obj$where_clause
 
-      export_df <- read_layer_data_all(
-        con = con,
-        table_name = input$table,
-        where_clause = where_clause
-      )
+        export_df <- read_layer_data_all(
+          con = con,
+          table_name = input$table,
+          where_clause = where_clause
+        )
 
-      if (!"WKT_GEOMETRY" %in% names(export_df)) {
-        stop("Selected table does not include WKT_GEOMETRY")
-      }
+        if (!"WKT_GEOMETRY" %in% names(export_df)) {
+          stop("Selected table does not include WKT_GEOMETRY")
+        }
 
-      if (nrow(export_df) == 0) {
-        stop("No features to export for the current filter.")
-      }
+        if (nrow(export_df) == 0) {
+          stop("No features to export for the current filter.")
+        }
 
-      wkt_geometry <- trimws(as.character(export_df$WKT_GEOMETRY))
-      if (!any(!is.na(wkt_geometry) & nzchar(wkt_geometry))) {
-        stop("No geometry is available to export for the current filter.")
-      }
+        wkt_geometry <- trimws(as.character(export_df$WKT_GEOMETRY))
+        if (!any(!is.na(wkt_geometry) & nzchar(wkt_geometry))) {
+          stop("No geometry is available to export for the current filter.")
+        }
 
-      export_sf <- st_as_sf(export_df, wkt = "WKT_GEOMETRY", crs = 4326)
-      geometry <- st_geometry(export_sf)
-      has_geometry <- !is.na(geometry) & !st_is_empty(geometry)
-      if (!any(has_geometry)) {
-        stop("No geometry is available to export for the current filter.")
-      }
+        export_sf <- st_as_sf(export_df, wkt = "WKT_GEOMETRY", crs = 4326)
+        geometry <- st_geometry(export_sf)
+        has_geometry <- !is.na(geometry) & !st_is_empty(geometry)
+        if (!any(has_geometry)) {
+          stop("No geometry is available to export for the current filter.")
+        }
 
-      layer_name <- gsub("[^A-Za-z0-9_]+", "_", input$table)
-      st_write(export_sf, dsn = file, layer = layer_name, delete_dsn = TRUE, quiet = TRUE)
+        layer_name <- gsub("[^A-Za-z0-9_]+", "_", input$table)
+        st_write(export_sf, dsn = file, layer = layer_name, delete_dsn = TRUE, quiet = TRUE)
+      }, error = function(error) {
+        showNotification(
+          paste("GeoPackage export failed:", error$message),
+          type = "error",
+          duration = NULL
+        )
+        stop(error)
+      })
     }
   )
 
   # Tag Explorer server logic
   all_tag_counts <- eventReactive(list(input$tag_refresh, input$parse_limit), {
     tryCatch({
-      counts <- get_all_tag_counts(con, input$parse_limit)
+      parse_limit <- validate_integer_range(
+        input$parse_limit,
+        100,
+        500000,
+        "other_tags parsing limit"
+      )
+      counts <- get_all_tag_counts(con, parse_limit)
       if (nrow(counts) == 0) {
         return(data.frame())
       }
