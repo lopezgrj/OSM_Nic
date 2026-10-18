@@ -1,61 +1,33 @@
-# OSM Nicaragua Data + Shiny Explorers
+# OSM Nicaragua Data and Shiny Explorers
 
-This project builds and explores OpenStreetMap (OSM) data for Nicaragua using DuckDB and Shiny.
+Local tools for downloading, importing, mapping, filtering, exporting, and
+inspecting OpenStreetMap data for Nicaragua with R, DuckDB, and Shiny.
 
-## Quick Start
+## Quick start
+
+Run from the project root:
 
 ```r
-install.packages(c("shiny", "DBI", "duckdb", "sf", "leaflet", "curl", "jsonlite"))
-source("code/downloadOSMData.R"); download_osm_data()
-source("code/importOSMData.R"); import_osm_data()
+install.packages(c(
+  "shiny", "DBI", "duckdb", "sf", "leaflet", "curl", "jsonlite"
+))
+
+source("code/downloadOSMData.R")
+download_osm_data()
+
+source("code/importOSMData.R")
+import_osm_data()
+
 shiny::runApp("app.R")
 ```
 
-Optional Taginfo DB setup (Very Large Download):
-
-```r
-source("code/downloadTaginfodb.R")
-```
-
-## Data Notice
-
-This repository contains code and documentation only. It does not include downloaded OSM extracts or derived DB files.
-
-If you generate those artifacts locally, they are governed by OpenStreetMap's ODbL terms.
-
-## Project Layout
-
-- [code/downloadOSMData.R](code/downloadOSMData.R): downloads the Nicaragua OSM PBF extract.
-- [code/importOSMData.R](code/importOSMData.R): converts the PBF into SQLite, then copies its tables into DuckDB.
-- [code/downloadTaginfodb.R](code/downloadTaginfodb.R): downloads and converts Taginfo DB into DuckDB.
-- [app.R](app.R): app launcher (opens in external browser when run from RStudio).
-- [geofabrik_downloader_app.R](geofabrik_downloader_app.R): Shiny app for downloading Geofabrik PBF extracts.
-- [osm_plot_app.R](osm_plot_app.R): main interactive map/filter/export app.
-- [osm_db_explorer_app.R](osm_db_explorer_app.R): schema/table exploration app.
-- [osm_tag_explorer_app.R](osm_tag_explorer_app.R): tag exploration across direct columns and `other_tags`.
-- [osm_logic_explorer_app.R](osm_logic_explorer_app.R): structure-focused explorer.
-- [data/nicaragua.duckdb](data/nicaragua.duckdb): main local analytics database.
-- [raw_data/nicaragua-latest.osm.pbf](raw_data/nicaragua-latest.osm.pbf): source extract (local artifact).
-
-## Requirements
-
-R packages:
-
-- `shiny`
-- `DBI`
-- `duckdb`
-- `sf`
-- `leaflet`
-
-Pipeline helpers may also use GDAL/OGR (`ogr2ogr`) depending on your ingestion path.
-
-Install GDAL/OGR before importing; on macOS with Homebrew:
+Install GDAL/OGR before importing. On macOS with Homebrew:
 
 ```sh
 brew install gdal
 ```
 
-Install the DuckDB extensions once before the first import:
+Install the required DuckDB extensions once:
 
 ```r
 con <- DBI::dbConnect(duckdb::duckdb())
@@ -64,86 +36,167 @@ DBI::dbExecute(con, "INSTALL sqlite;")
 DBI::dbDisconnect(con, shutdown = TRUE)
 ```
 
-## Build Or Refresh Data
+## Project layout
 
-Download the OSM PBF extract:
+- [`app.R`](app.R): primary map, filter, export, and tag-summary app.
+- [`geofabrik_downloader_app.R`](geofabrik_downloader_app.R): Geofabrik PBF
+  catalog and download app.
+- [`osm_db_explorer_app.R`](osm_db_explorer_app.R): DuckDB schema, table, and
+  sample-row explorer.
+- [`osm_tag_explorer_app.R`](osm_tag_explorer_app.R): standalone tag explorer.
+- [`code/downloadOSMData.R`](code/downloadOSMData.R): atomic PBF download
+  helper.
+- [`code/importOSMData.R`](code/importOSMData.R): PBF-to-SQLite-to-DuckDB
+  import pipeline.
+- [`code/downloadTaginfodb.R`](code/downloadTaginfodb.R): optional Taginfo
+  database downloader and converter.
+- [`Nature_Reserves.R`](Nature_Reserves.R): example feature-selection and
+  plotting analysis.
+- [`SPECIFICATION.md`](SPECIFICATION.md): requirements, data contracts,
+  limitations, and acceptance plan.
 
-```r
-source("code/downloadOSMData.R")
-download_osm_data()
+The primary application is `app.R`. This repository does not contain
+`osm_plot_app.R` or `osm_logic_explorer_app.R`.
+
+## Data flow
+
+```mermaid
+flowchart LR
+  A[Geofabrik PBF] --> B[raw_data/nicaragua-latest.osm.pbf]
+  B --> C[data/nicaragua.sqlite]
+  C --> D[data/nicaragua.duckdb]
+  D --> E[Shiny explorers]
+  D --> F[GeoPackage export]
+  D --> G[R analysis]
 ```
 
-Import the downloaded PBF into SQLite and DuckDB:
+Downloaded and generated data are local artifacts:
 
-```r
-source("code/importOSMData.R")
-import_osm_data()
-```
+- `raw_data/nicaragua-latest.osm.pbf`
+- `data/nicaragua.sqlite`
+- `data/nicaragua.duckdb`
+- `data/taginfo-db.duckdb`
 
-Both functions accept `project_dir` (default: the current working directory) and `source_url` arguments. For example, run `import_osm_data(project_dir = "/path/to/OSM_Nic")` from another R working directory.
+They are not required to be committed.
 
-Optional: download and convert Taginfo database:
-
-```r
-source("code/downloadTaginfodb.R")
-```
-
-## Run Main App
-
-Start the main app:
+## Main application
 
 ```r
 shiny::runApp("app.R")
 ```
 
-## Run Geofabrik Downloader
+The application:
 
-Start the download app from the project root:
+- Opens `data/nicaragua.duckdb` read-only.
+- Selects tables containing `WKT_GEOMETRY`.
+- Filters direct columns, `other_tags`, or both.
+- Supports case-insensitive contains and exact matching.
+- Supports `AND`, `OR`, `&`, and `||` expressions.
+- Maps point, line, and polygon WKT as EPSG:4326.
+- Limits map-loaded rows from 100 through 100,000.
+- Exports all matching rows to GeoPackage.
+- Summarizes direct-column and sampled `other_tags` values.
+
+`other_tags` summary counts may be incomplete because parsing is limited per
+table. See the known limitations in
+[`SPECIFICATION.md`](SPECIFICATION.md#11-known-limitations).
+
+## Other applications
+
+Geofabrik downloader:
 
 ```r
 shiny::runApp("geofabrik_downloader_app.R")
 ```
 
-The app loads Geofabrik's live catalog of available PBF extracts. Choose an extract
-from the searchable list to populate its URL and file name, or enter a URL manually.
-The default selection downloads the latest Nicaragua extract into `raw_data/`.
+Database explorer:
 
-`app.R` forces external browser launch in interactive RStudio sessions to avoid Viewer-specific issues.
-
-## Main App Features ([osm_plot_app.R](osm_plot_app.R))
-
-1. Select any OSM geometry layer containing `WKT_GEOMETRY`.
-2. Filter from one source:
-   - `Direct column`
-   - `other_tags` key/value
-   - `Any` (search direct columns + `other_tags` together)
-3. Value matching modes:
-   - `Contains`
-   - `Exact`
-4. Boolean expressions in tag value:
-   - word operators: `AND`, `OR`
-   - symbolic operators: `&`, `||`
-   - quoted literals supported (example: `"or"`).
-5. Layer stats table (`total_rows`, `matched_rows`, `loaded_rows`).
-6. Leaflet rendering by geometry type (points/lines/polygons).
-7. GeoPackage export of all filtered matches (not limited by map draw count).
-8. Hover help tooltips on sidebar controls.
-
-## Typical Geometry Tables
-
-Depending on import settings, common tables include:
-
-- `points`
-- `lines`
-- `multilinestrings`
-- `multipolygons`
-- `other_relations`
-
-## Data Flow
-
-```mermaid
-flowchart LR
-  A[raw_data/nicaragua-latest.osm.pbf] --> B[data/nicaragua.sqlite]
-  B --> C[data/nicaragua.duckdb]
-  C --> D[Shiny explorers and analysis]
+```r
+shiny::runApp("osm_db_explorer_app.R")
 ```
+
+Standalone tag explorer:
+
+```r
+shiny::runApp("osm_tag_explorer_app.R")
+```
+
+Optional Taginfo database:
+
+```r
+source("code/downloadTaginfodb.R")
+```
+
+## Helper arguments
+
+`download_osm_data()` accepts:
+
+- `project_dir`
+- `source_url`
+- `file_name`
+- `progress_callback`
+
+`import_osm_data()` accepts:
+
+- `project_dir`
+- `source_url`
+
+Example:
+
+```r
+source("code/importOSMData.R")
+import_osm_data(project_dir = "/path/to/OSM_Nic")
+```
+
+The importer always reads
+`<project_dir>/raw_data/nicaragua-latest.osm.pbf`.
+
+## Runtime requirements
+
+Main application:
+
+- R
+- `shiny`
+- `DBI`
+- `duckdb`
+- `sf`
+- `leaflet`
+
+Pipeline and auxiliary tools:
+
+- GDAL/OGR `ogr2ogr`
+- DuckDB `spatial` and `sqlite` extensions
+- `curl` R package, optional for the download helper
+- `jsonlite` and the `curl` command-line program for the downloader app
+- `terra` and `ggplot2` for the example analysis
+
+The recorded reference versions and platform are listed in
+[`SPECIFICATION.md`](SPECIFICATION.md#5-runtime-compatibility). The project
+does not yet provide an `renv.lock` or a multi-platform CI compatibility
+matrix.
+
+## Operational notes
+
+- Run applications from the project root.
+- Internet access is required for source downloads and online map tiles.
+- Imports and generated databases may require substantial disk space.
+- GeoPackage export loads all matching rows and may require substantial
+  memory.
+- The applications are intended for a single local user.
+- Current implementation limitations and planned corrections are tracked in
+  [`SPECIFICATION.md`](SPECIFICATION.md#11-known-limitations).
+
+## License and OSM attribution
+
+Project code is licensed under the
+[`LICENSE`](LICENSE) terms.
+
+OSM-derived data is governed by the OpenStreetMap Open Database License.
+Interactive maps use OpenStreetMap Mapnik tiles with provider attribution.
+When distributing generated databases, GeoPackages, or derivative works,
+include appropriate OpenStreetMap attribution and comply with the ODbL.
+
+See:
+
+- <https://www.openstreetmap.org/copyright>
+- <https://opendatacommons.org/licenses/odbl/>
